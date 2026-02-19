@@ -7,6 +7,7 @@ from sqlalchemy import create_engine, Column, Integer, String
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from dotenv import load_dotenv
+from datetime import date, timedelta
 
 # Load environment variables
 load_dotenv()
@@ -101,6 +102,38 @@ def get_slots(date: str = Query(None, description="Date in YYYY-MM-DD format"), 
             "slots": slots_with_status
         }
     ]
+
+@app.get("/next-availability")
+def get_next_availability(db: Session = Depends(get_db)):
+    """Returns the next slot that is not already booked, starting from today."""
+    all_slots = ["09:00 AM", "10:00 AM", "11:00 AM", "02:00 PM", "03:00 PM", "04:00 PM"]
+
+    # Day display helpers
+    def friendly_date(d: date) -> str:
+        today = date.today()
+        if d == today:
+            return "Today"
+        elif d == today + timedelta(days=1):
+            return "Tomorrow"
+        else:
+            return d.strftime("%d %b")  # e.g. "22 Feb"
+
+    for day_offset in range(7):
+        check_date = date.today() + timedelta(days=day_offset)
+        date_str = check_date.strftime("%Y-%m-%d")
+
+        booked = db.query(Booking.time).filter(Booking.date == date_str).all()
+        booked_times = {b[0] for b in booked}
+
+        for slot in all_slots:
+            if slot not in booked_times:
+                return {
+                    "date": date_str,
+                    "time": slot,
+                    "display": f"{friendly_date(check_date)}, {slot}"
+                }
+
+    return {"date": None, "time": None, "display": "No availability this week"}
 
 @app.post("/create-order")
 def create_order(order: OrderRequest, db: Session = Depends(get_db)):

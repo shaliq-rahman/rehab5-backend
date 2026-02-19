@@ -1,4 +1,4 @@
-import smtplib
+import base64
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import os
@@ -10,7 +10,10 @@ from googleapiclient.discovery import build
 
 SERVICE_ACCOUNT_FILE = os.path.join(os.path.dirname(__file__), 'service_account.json')
 TOKEN_FILE = os.path.join(os.path.dirname(__file__), 'token.json')
-CALENDAR_SCOPES = ['https://www.googleapis.com/auth/calendar']
+CALENDAR_SCOPES = [
+    'https://www.googleapis.com/auth/calendar',
+    'https://www.googleapis.com/auth/gmail.send',
+]
 
 
 def _get_calendar_service():
@@ -99,25 +102,32 @@ def create_calendar_event(date_str: str, time_str: str, meet_link: str) -> bool:
 
 
 def send_email(to_email: str, subject: str, body: str) -> bool:
-    password = os.getenv("GMAIL_APP_PASSWORD")
+    """
+    Sends an email via the Gmail API (HTTPS) instead of SMTP.
+    Uses the existing token.json OAuth credentials.
+    """
     sender_email = os.getenv("GMAIL_USER")
-
-    if not sender_email or not password:
-        print("GMAIL_USER or GMAIL_APP_PASSWORD not found in env")
+    if not sender_email:
+        print("GMAIL_USER not found in env")
         return False
 
-    msg = MIMEMultipart("alternative")
-    msg['From'] = sender_email
-    msg['To'] = to_email
-    msg['Subject'] = subject
-    msg.attach(MIMEText(body, 'html'))
-
     try:
-        server = smtplib.SMTP('smtp.gmail.com', 587)
-        server.starttls()
-        server.login(sender_email, password)
-        server.sendmail(sender_email, to_email, msg.as_string())
-        server.quit()
+        creds = Credentials.from_authorized_user_file(TOKEN_FILE, CALENDAR_SCOPES)
+        service = build('gmail', 'v1', credentials=creds)
+
+        msg = MIMEMultipart("alternative")
+        msg['From'] = sender_email
+        msg['To'] = to_email
+        msg['Subject'] = subject
+        msg.attach(MIMEText(body, 'html'))
+
+        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+        service.users().messages().send(
+            userId='me',
+            body={'raw': raw}
+        ).execute()
+
+        print(f"Email sent successfully to {to_email}")
         return True
     except Exception as e:
         print(f"Email failed: {e}")
