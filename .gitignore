@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+*.log
+.pytest_cache/
+
+# Secrets - DO NOT COMMIT
+.env
+token.json
+credentials.json
+service_account.json
+
+# Database
+bookings.db
+
+# macOS
+.DS_Store
