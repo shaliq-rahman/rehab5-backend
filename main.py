@@ -5,7 +5,7 @@ from pydantic import BaseModel
 import razorpay
 import os
 import jwt
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from sqlalchemy import create_engine, Column, Integer, String, DateTime
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
@@ -59,7 +59,9 @@ def get_current_admin(token: str = Depends(oauth2_scheme)):
         raise credentials_exception
     return username
 
-# Booking Model
+def get_ist_time():
+    return datetime.utcnow() + timedelta(hours=5, minutes=30)
+
 class Booking(Base):
     __tablename__ = "bookings"
     id = Column(Integer, primary_key=True, index=True)
@@ -71,7 +73,7 @@ class Booking(Base):
     order_id = Column(String, unique=True, index=True)
     status = Column(String, default="Pending")
     amount = Column(Integer, default=0)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=get_ist_time)
 
 Base.metadata.create_all(bind=engine)
 
