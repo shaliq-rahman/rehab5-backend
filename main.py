@@ -6,7 +6,7 @@ import razorpay
 import os
 import jwt
 from datetime import datetime
-from sqlalchemy import create_engine, Column, Integer, String
+from sqlalchemy import create_engine, Column, Integer, String, DateTime
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from dotenv import load_dotenv
@@ -70,6 +70,7 @@ class Booking(Base):
     phone = Column(String)
     order_id = Column(String, unique=True, index=True)
     status = Column(String, default="Pending")
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 Base.metadata.create_all(bind=engine)
 
