@@ -258,31 +258,46 @@ def resend_booking_email(booking_id: int, db: Session = Depends(get_db), current
     return {"status": "success", "message": "Email resent successfully."}
 
 @app.get("/slots")
-def get_slots(date: str = Query(None, description="Date in YYYY-MM-DD format"), db: Session = Depends(get_db)):
-    if not date:
-        date = "Today"
+def get_slots(date_str: str = Query(None, alias="date", description="Date in YYYY-MM-DD format"), db: Session = Depends(get_db)):
+    if not date_str:
+        date_str = date.today().strftime("%Y-%m-%d")
     
     # Define all possible slots
     all_slots = ["09:00 AM", "10:00 AM", "11:00 AM", "02:00 PM", "03:00 PM", "04:00 PM"]
     
-    # Fetch booked slots from DB for the given date
-    booked_slots = db.query(Booking.time).filter(Booking.date == date).all()
-    booked_times = [slot[0] for slot in booked_slots]
+    # Fetch booked slots from DB for the given date (ONLY Confirmed ones)
+    booked_slots = db.query(Booking.time).filter(
+        Booking.date == date_str, 
+        Booking.status == "Confirmed"
+    ).all()
+    booked_times = {slot[0] for slot in booked_slots}
     
-    
-    # Filter available slots
-    # available_slots = [slot for slot in all_slots if slot not in booked_times]
+    # Current time in IST for comparison
+    now_ist = get_ist_time()
+    today_str = now_ist.strftime("%Y-%m-%d")
     
     slots_with_status = []
-    for slot in all_slots:
+    for slot_time_str in all_slots:
+        is_booked = slot_time_str in booked_times
+        is_passed = False
+        
+        if date_str == today_str:
+            # Parse slot time (e.g., "09:00 AM")
+            slot_dt = datetime.strptime(slot_time_str, "%I:%M %p")
+            # Create a full datetime for today with this slot time
+            slot_full_dt = now_ist.replace(hour=slot_dt.hour, minute=slot_dt.minute, second=0, microsecond=0)
+            if now_ist > slot_full_dt:
+                is_passed = True
+        
         slots_with_status.append({
-            "time": slot,
-            "booked": slot in booked_times
+            "time": slot_time_str,
+            "booked": is_booked,
+            "passed": is_passed
         })
     
     return [
         {
-            "date": date,
+            "date": date_str,
             "slots": slots_with_status
         }
     ]
@@ -291,6 +306,8 @@ def get_slots(date: str = Query(None, description="Date in YYYY-MM-DD format"), 
 def get_next_availability(db: Session = Depends(get_db)):
     """Returns the next slot that is not already booked, starting from today."""
     all_slots = ["09:00 AM", "10:00 AM", "11:00 AM", "02:00 PM", "03:00 PM", "04:00 PM"]
+    now_ist = get_ist_time()
+    today_str = now_ist.strftime("%Y-%m-%d")
 
     # Day display helpers
     def friendly_date(d: date) -> str:
@@ -306,15 +323,25 @@ def get_next_availability(db: Session = Depends(get_db)):
         check_date = date.today() + timedelta(days=day_offset)
         date_str = check_date.strftime("%Y-%m-%d")
 
-        booked = db.query(Booking.time).filter(Booking.date == date_str).all()
+        booked = db.query(Booking.time).filter(
+            Booking.date == date_str,
+            Booking.status == "Confirmed"
+        ).all()
         booked_times = {b[0] for b in booked}
 
-        for slot in all_slots:
-            if slot not in booked_times:
+        for slot_time_str in all_slots:
+            if slot_time_str not in booked_times:
+                # Check if it has passed if it's today
+                if date_str == today_str:
+                    slot_dt = datetime.strptime(slot_time_str, "%I:%M %p")
+                    slot_full_dt = now_ist.replace(hour=slot_dt.hour, minute=slot_dt.minute, second=0, microsecond=0)
+                    if now_ist > slot_full_dt:
+                        continue # Skip passed slot
+
                 return {
                     "date": date_str,
-                    "time": slot,
-                    "display": f"{friendly_date(check_date)}, {slot}"
+                    "time": slot_time_str,
+                    "display": f"{friendly_date(check_date)}, {slot_time_str}"
                 }
 
     return {"date": None, "time": None, "display": "No availability this week"}
@@ -322,8 +349,12 @@ def get_next_availability(db: Session = Depends(get_db)):
 @app.post("/create-order")
 def create_order(order: OrderRequest, db: Session = Depends(get_db)):
     try:
-        # Check if slot is already booked
-        existing_booking = db.query(Booking).filter(Booking.date == order.date, Booking.time == order.slot).first()
+        # Check if slot is already booked (Confirmed status only)
+        existing_booking = db.query(Booking).filter(
+            Booking.date == order.date, 
+            Booking.time == order.slot,
+            Booking.status == "Confirmed"
+        ).first()
         if existing_booking:
              raise HTTPException(status_code=400, detail="Slot already booked")
 
