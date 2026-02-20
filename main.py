@@ -343,7 +343,7 @@ def create_order(order: OrderRequest, db: Session = Depends(get_db)):
             email=order.email,
             phone=order.phone,
             order_id=payment['id'] if 'id' in payment else "order_mock_123",
-            amount=order.amount,
+            amount=order.amount // 100,
             status="Pending"
         )
         db.add(new_booking)
@@ -362,7 +362,7 @@ def create_order(order: OrderRequest, db: Session = Depends(get_db)):
                 email=order.email,
                 phone=order.phone,
                 order_id=mock_order_id,
-                amount=order.amount,
+                amount=order.amount // 100,
                 status="Pending"
             )
              db.add(new_booking)
