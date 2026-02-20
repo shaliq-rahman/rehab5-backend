@@ -4,9 +4,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import razorpay
 import os
+import json
+import urllib.request
 import jwt
 from datetime import datetime, timezone, timedelta
-from sqlalchemy import create_engine, Column, Integer, String, DateTime
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Float
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from dotenv import load_dotenv
@@ -59,8 +61,13 @@ def get_current_admin(token: str = Depends(oauth2_scheme)):
         raise credentials_exception
     return username
 
-def get_ist_time():
-    return datetime.utcnow() + timedelta(hours=5, minutes=30)
+# UAE Standard Time = UTC+4
+UAE_OFFSET = timedelta(hours=4)
+AED_CONSULTATION_FEE = 250  # AED — shown to user
+
+
+def get_uae_time():
+    return datetime.utcnow() + UAE_OFFSET
 
 class Booking(Base):
     __tablename__ = "bookings"
@@ -72,8 +79,10 @@ class Booking(Base):
     phone = Column(String)
     order_id = Column(String, unique=True, index=True)
     status = Column(String, default="Pending")
-    amount = Column(Integer, default=0)
-    created_at = Column(DateTime, default=get_ist_time)
+    amount = Column(Integer, default=0)           # legacy, kept for compat
+    amount_aed = Column(Float, default=0.0)       # AED amount shown to user
+    amount_inr = Column(Float, default=0.0)       # INR amount charged via Razorpay
+    created_at = Column(DateTime, default=datetime.utcnow)  # always UTC
 
 Base.metadata.create_all(bind=engine)
 
@@ -94,8 +103,7 @@ RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET", "PLACEHOLDER_SECRET")
 razorpay_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
 
 class OrderRequest(BaseModel):
-    amount: int
-    currency: str = "INR"
+    amount_aed: float = AED_CONSULTATION_FEE  # AED fee; backend converts to INR paise
     receipt: str = "receipt#1"
     date: str
     slot: str
@@ -114,6 +122,7 @@ def get_db():
 @app.get("/")
 def read_root():
     return {"Hello": "World"}
+
 
 @app.post("/admin/login")
 def login(form_data: OAuth2PasswordRequestForm = Depends()):
@@ -198,7 +207,7 @@ def resend_booking_email(booking_id: int, db: Session = Depends(get_db), current
                     <table width="100%">
                       <tr>
                         <td style="color:#6b7280;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:1px;width:40%;">🕐 Time</td>
-                        <td style="color:#111827;font-size:15px;font-weight:600;">{booking.time} (IST)</td>
+                         <td style="color:#111827;font-size:15px;font-weight:600;">{booking.time} (UAE Time / GST)</td>
                       </tr>
                     </table>
                   </td>
@@ -262,7 +271,7 @@ def get_slots(date_str: str = Query(None, alias="date", description="Date in YYY
     if not date_str:
         date_str = date.today().strftime("%Y-%m-%d")
     
-    # Define all possible slots
+    # Define all possible slots (UAE business hours, GST/UTC+4)
     all_slots = ["09:00 AM", "10:00 AM", "11:00 AM", "02:00 PM", "03:00 PM", "04:00 PM"]
     
     # Fetch booked slots from DB for the given date (ONLY Confirmed ones)
@@ -272,9 +281,9 @@ def get_slots(date_str: str = Query(None, alias="date", description="Date in YYY
     ).all()
     booked_times = {slot[0] for slot in booked_slots}
     
-    # Current time in IST for comparison
-    now_ist = get_ist_time()
-    today_str = now_ist.strftime("%Y-%m-%d")
+    # Current time in UAE (UTC+4) for comparison
+    now_uae = get_uae_time()
+    today_str = now_uae.strftime("%Y-%m-%d")
     
     slots_with_status = []
     for slot_time_str in all_slots:
@@ -284,9 +293,9 @@ def get_slots(date_str: str = Query(None, alias="date", description="Date in YYY
         if date_str == today_str:
             # Parse slot time (e.g., "09:00 AM")
             slot_dt = datetime.strptime(slot_time_str, "%I:%M %p")
-            # Create a full datetime for today with this slot time
-            slot_full_dt = now_ist.replace(hour=slot_dt.hour, minute=slot_dt.minute, second=0, microsecond=0)
-            if now_ist > slot_full_dt:
+            # Create a full datetime for today in UAE time
+            slot_full_dt = now_uae.replace(hour=slot_dt.hour, minute=slot_dt.minute, second=0, microsecond=0)
+            if now_uae > slot_full_dt:
                 is_passed = True
         
         slots_with_status.append({
@@ -304,10 +313,10 @@ def get_slots(date_str: str = Query(None, alias="date", description="Date in YYY
 
 @app.get("/next-availability")
 def get_next_availability(db: Session = Depends(get_db)):
-    """Returns the next slot that is not already booked, starting from today."""
+    """Returns the next slot that is not already booked, starting from today (UAE time)."""
     all_slots = ["09:00 AM", "10:00 AM", "11:00 AM", "02:00 PM", "03:00 PM", "04:00 PM"]
-    now_ist = get_ist_time()
-    today_str = now_ist.strftime("%Y-%m-%d")
+    now_uae = get_uae_time()
+    today_str = now_uae.strftime("%Y-%m-%d")
 
     # Day display helpers
     def friendly_date(d: date) -> str:
@@ -331,12 +340,12 @@ def get_next_availability(db: Session = Depends(get_db)):
 
         for slot_time_str in all_slots:
             if slot_time_str not in booked_times:
-                # Check if it has passed if it's today
+                # Check if it has passed if it's today (UAE time)
                 if date_str == today_str:
                     slot_dt = datetime.strptime(slot_time_str, "%I:%M %p")
-                    slot_full_dt = now_ist.replace(hour=slot_dt.hour, minute=slot_dt.minute, second=0, microsecond=0)
-                    if now_ist > slot_full_dt:
-                        continue # Skip passed slot
+                    slot_full_dt = now_uae.replace(hour=slot_dt.hour, minute=slot_dt.minute, second=0, microsecond=0)
+                    if now_uae > slot_full_dt:
+                        continue  # Skip passed slot
 
                 return {
                     "date": date_str,
@@ -348,6 +357,9 @@ def get_next_availability(db: Session = Depends(get_db)):
 
 @app.post("/create-order")
 def create_order(order: OrderRequest, db: Session = Depends(get_db)):
+    aed_fee = order.amount_aed if order.amount_aed > 0 else AED_CONSULTATION_FEE
+    aed_fils = int(aed_fee * 100)                    # Razorpay needs smallest subunit
+
     try:
         # Check if slot is already booked (Confirmed status only)
         existing_booking = db.query(Booking).filter(
@@ -359,14 +371,14 @@ def create_order(order: OrderRequest, db: Session = Depends(get_db)):
              raise HTTPException(status_code=400, detail="Slot already booked")
 
         data = {
-            "amount": order.amount,
-            "currency": order.currency,
+            "amount": aed_fils,
+            "currency": "AED",
             "receipt": order.receipt,
             "payment_capture": 1
         }
         payment = razorpay_client.order.create(data=data)
         
-        # Save booking to DB as Pending
+        # Save booking to DB as Pending with both AED and INR amounts
         new_booking = Booking(
             date=order.date,
             time=order.slot,
@@ -374,7 +386,9 @@ def create_order(order: OrderRequest, db: Session = Depends(get_db)):
             email=order.email,
             phone=order.phone,
             order_id=payment['id'] if 'id' in payment else "order_mock_123",
-            amount=order.amount // 100,
+            amount=int(aed_fee),     # legacy field (INR)
+            amount_aed=aed_fee,
+            amount_inr=0.0,
             status="Pending"
         )
         db.add(new_booking)
@@ -393,7 +407,9 @@ def create_order(order: OrderRequest, db: Session = Depends(get_db)):
                 email=order.email,
                 phone=order.phone,
                 order_id=mock_order_id,
-                amount=order.amount // 100,
+                amount=int(aed_fee),
+                amount_aed=aed_fee,
+                amount_inr=0.0,
                 status="Pending"
             )
              db.add(new_booking)
@@ -402,10 +418,10 @@ def create_order(order: OrderRequest, db: Session = Depends(get_db)):
              return {
                 "id": mock_order_id,
                 "entity": "order",
-                "amount": order.amount,
+                "amount": aed_fils,
                 "amount_paid": 0,
-                "amount_due": order.amount,
-                "currency": "INR",
+                "amount_due": aed_fils,
+                "currency": "AED",
                 "receipt": order.receipt,
                 "status": "created",
                 "attempts": 0,
@@ -496,7 +512,7 @@ def verify_payment(data: PaymentVerification, db: Session = Depends(get_db)):
                     <table width="100%">
                       <tr>
                         <td style="color:#6b7280;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:1px;width:40%;">🕐 Time</td>
-                        <td style="color:#111827;font-size:15px;font-weight:600;">{data.slot} (IST)</td>
+                         <td style="color:#111827;font-size:15px;font-weight:600;">{data.slot} (UAE Time / GST)</td>
                       </tr>
                     </table>
                   </td>
