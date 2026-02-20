@@ -1,8 +1,11 @@
-from fastapi import FastAPI, HTTPException, Query, Depends
+from fastapi import FastAPI, HTTPException, Query, Depends, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import razorpay
 import os
+import jwt
+from datetime import datetime
 from sqlalchemy import create_engine, Column, Integer, String
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
@@ -20,6 +23,41 @@ if not SQLALCHEMY_DATABASE_URL:
 engine = create_engine(SQLALCHEMY_DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+
+# JWT Auth Secrets
+SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-super-secret-key-that-should-be-changed")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 1 day
+
+ADMIN_USER = os.getenv("ADMIN_USER", "admin")
+ADMIN_PASS = os.getenv("ADMIN_PASS", "password123")
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="admin/login")
+
+def create_access_token(data: dict, expires_delta: timedelta = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=15)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+def get_current_admin(token: str = Depends(oauth2_scheme)):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None or username != ADMIN_USER:
+            raise credentials_exception
+    except jwt.PyJWTError:
+        raise credentials_exception
+    return username
 
 # Booking Model
 class Booking(Base):
@@ -72,6 +110,148 @@ def get_db():
 @app.get("/")
 def read_root():
     return {"Hello": "World"}
+
+@app.post("/admin/login")
+def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    if form_data.username != ADMIN_USER or form_data.password != ADMIN_PASS:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": ADMIN_USER}, expires_delta=access_token_expires
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
+
+@app.get("/admin/bookings")
+def get_all_bookings(
+    date: str = Query(None, description="Filter by date in YYYY-MM-DD format"),
+    db: Session = Depends(get_db), 
+    current_admin: str = Depends(get_current_admin)
+):
+    query = db.query(Booking)
+    if date:
+        query = query.filter(Booking.date == date)
+        
+    bookings = query.order_by(Booking.id.desc()).all()
+    return bookings
+
+@app.post("/admin/resend-email/{booking_id}")
+def resend_booking_email(booking_id: int, db: Session = Depends(get_db), current_admin: str = Depends(get_current_admin)):
+    booking = db.query(Booking).filter(Booking.id == booking_id).first()
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+        
+    from utils import send_email, generate_meet_link
+    meet_link = generate_meet_link(booking.date, booking.time)
+    
+    subject = "Your Rehab 5 Booking is Confirmed ✅"
+    body = f"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Booking Confirmed</title>
+</head>
+<body style="margin:0;padding:0;background-color:#f0f4f8;font-family:'Segoe UI',Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f0f4f8;padding:40px 0;">
+    <tr>
+      <td align="center">
+        <table width="600" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.08);">
+          <!-- Header -->
+          <tr>
+            <td style="background:linear-gradient(135deg,#0f766e,#14b8a6);padding:40px 40px 32px;text-align:center;">
+              <div style="display:inline-block;background:rgba(255,255,255,0.15);border-radius:12px;padding:10px 24px;margin-bottom:16px;">
+                <span style="color:#ffffff;font-size:22px;font-weight:800;letter-spacing:2px;">REHAB 5</span>
+              </div>
+              <h1 style="color:#ffffff;margin:0;font-size:26px;font-weight:700;letter-spacing:0.5px;">Booking Confirmed</h1>
+              <p style="color:rgba(255,255,255,0.85);margin:8px 0 0;font-size:14px;">Your consultation has been successfully scheduled</p>
+            </td>
+          </tr>
+          <!-- Body -->
+          <tr>
+            <td style="padding:40px;">
+              <p style="color:#374151;font-size:15px;margin:0 0 24px;">Hi {booking.name} 👋,<br/><br/>
+              Great news! Your appointment with <strong>Rehab 5</strong> has been confirmed. We look forward to seeing you.</p>
+
+              <!-- Details Card -->
+              <table width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc;border-radius:12px;border:1px solid #e2e8f0;margin-bottom:28px;">
+                <tr>
+                  <td style="padding:20px 24px;border-bottom:1px solid #e2e8f0;">
+                    <table width="100%">
+                      <tr>
+                        <td style="color:#6b7280;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:1px;width:40%;">📅 Date</td>
+                        <td style="color:#111827;font-size:15px;font-weight:600;">{booking.date}</td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding:20px 24px;border-bottom:1px solid #e2e8f0;">
+                    <table width="100%">
+                      <tr>
+                        <td style="color:#6b7280;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:1px;width:40%;">🕐 Time</td>
+                        <td style="color:#111827;font-size:15px;font-weight:600;">{booking.time} (IST)</td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding:20px 24px;">
+                    <table width="100%">
+                      <tr>
+                        <td style="color:#6b7280;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:1px;width:40%;">🎥 Meeting</td>
+                        <td style="color:#111827;font-size:15px;font-weight:600;">Online Video Call</td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- CTA Button -->
+              <table width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td align="center" style="padding:8px 0 32px;">
+                    <a href="{meet_link}" target="_blank"
+                       style="display:inline-block;background:linear-gradient(135deg,#0f766e,#14b8a6);color:#ffffff;text-decoration:none;font-size:16px;font-weight:700;padding:16px 40px;border-radius:50px;letter-spacing:0.5px;box-shadow:0 4px 14px rgba(20,184,166,0.4);">
+                      🎥 &nbsp; Join Video Consultation
+                    </a>
+                  </td>
+                </tr>
+              </table>
+              <p style="color:#6b7280;font-size:13px;text-align:center;margin:0 0 8px;">Or copy this link to your browser:</p>
+              <p style="color:#0f766e;font-size:13px;text-align:center;word-break:break-all;margin:0 0 32px;">{meet_link}</p>
+              <!-- Reminder -->
+              <table width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td style="background:#fffbeb;border-left:4px solid #f59e0b;border-radius:0 8px 8px 0;padding:14px 18px;">
+                    <p style="margin:0;color:#92400e;font-size:13px;">⏰ <strong>Reminder:</strong> Please join the meeting 5 minutes before your scheduled time.</p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          <!-- Footer -->
+          <tr>
+            <td style="background:#f8fafc;padding:24px 40px;border-top:1px solid #e2e8f0;text-align:center;">
+              <p style="color:#9ca3af;font-size:12px;margin:0 0 4px;">© 2025 Rehab 5. All rights reserved.</p>
+              <p style="color:#9ca3af;font-size:12px;margin:0;">If you need to reschedule, please contact us at <a href="mailto:contactsoocher@gmail.com" style="color:#14b8a6;text-decoration:none;">contactsoocher@gmail.com</a></p>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
+"""
+    email_sent = send_email(booking.email, subject, body)
+    if not email_sent:
+         raise HTTPException(status_code=500, detail="Failed to send email via SMTP.")
+    return {"status": "success", "message": "Email resent successfully."}
 
 @app.get("/slots")
 def get_slots(date: str = Query(None, description="Date in YYYY-MM-DD format"), db: Session = Depends(get_db)):
