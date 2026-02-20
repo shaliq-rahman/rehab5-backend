@@ -70,6 +70,7 @@ class Booking(Base):
     phone = Column(String)
     order_id = Column(String, unique=True, index=True)
     status = Column(String, default="Pending")
+    amount = Column(Integer, default=0)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 Base.metadata.create_all(bind=engine)
@@ -340,6 +341,7 @@ def create_order(order: OrderRequest, db: Session = Depends(get_db)):
             email=order.email,
             phone=order.phone,
             order_id=payment['id'] if 'id' in payment else "order_mock_123",
+            amount=order.amount,
             status="Pending"
         )
         db.add(new_booking)
@@ -358,6 +360,7 @@ def create_order(order: OrderRequest, db: Session = Depends(get_db)):
                 email=order.email,
                 phone=order.phone,
                 order_id=mock_order_id,
+                amount=order.amount,
                 status="Pending"
             )
              db.add(new_booking)
