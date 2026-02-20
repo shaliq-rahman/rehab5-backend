@@ -65,6 +65,27 @@ def get_current_admin(token: str = Depends(oauth2_scheme)):
 UAE_OFFSET = timedelta(hours=4)
 AED_CONSULTATION_FEE = 250  # AED — shown to user
 
+# ── Real-time exchange rate cache (1-hour TTL) ──
+_rate_cache: dict = {"rate": 23.0, "fetched_at": None}
+EXCHANGE_RATE_TTL = timedelta(hours=1)
+EXCHANGE_RATE_API = "https://open.er-api.com/v6/latest/AED"
+
+def get_aed_to_inr_rate() -> float:
+    """Fetch real-time AED→INR rate from open.er-api.com with 1-hour cache."""
+    global _rate_cache
+    now = datetime.utcnow()
+    if _rate_cache["fetched_at"] is None or now - _rate_cache["fetched_at"] > EXCHANGE_RATE_TTL:
+        try:
+            with urllib.request.urlopen(EXCHANGE_RATE_API, timeout=5) as resp:
+                data = json.loads(resp.read())
+            if data.get("result") == "success":
+                rate = data["rates"].get("INR", 23.0)
+                _rate_cache = {"rate": round(rate, 4), "fetched_at": now}
+                print(f"[exchange-rate] Fetched live AED→INR: {_rate_cache['rate']}")
+        except Exception as e:
+            print(f"[exchange-rate] Fetch failed, using cached rate {_rate_cache['rate']}: {e}")
+    return _rate_cache["rate"]
+
 
 def get_uae_time():
     return datetime.utcnow() + UAE_OFFSET
@@ -359,6 +380,10 @@ def get_next_availability(db: Session = Depends(get_db)):
 def create_order(order: OrderRequest, db: Session = Depends(get_db)):
     aed_fee = order.amount_aed if order.amount_aed > 0 else AED_CONSULTATION_FEE
     aed_fils = int(aed_fee * 100)                    # Razorpay needs smallest subunit
+    
+    # Internal tracking: calculate INR equivalent
+    live_rate = get_aed_to_inr_rate()
+    inr_amount = round(aed_fee * live_rate, 2)
 
     try:
         # Check if slot is already booked (Confirmed status only)
@@ -386,9 +411,9 @@ def create_order(order: OrderRequest, db: Session = Depends(get_db)):
             email=order.email,
             phone=order.phone,
             order_id=payment['id'] if 'id' in payment else "order_mock_123",
-            amount=int(aed_fee),     # legacy field (INR)
+            amount=int(inr_amount),     # legacy field (INR)
             amount_aed=aed_fee,
-            amount_inr=0.0,
+            amount_inr=inr_amount,
             status="Pending"
         )
         db.add(new_booking)
@@ -407,9 +432,9 @@ def create_order(order: OrderRequest, db: Session = Depends(get_db)):
                 email=order.email,
                 phone=order.phone,
                 order_id=mock_order_id,
-                amount=int(aed_fee),
+                amount=int(inr_amount),
                 amount_aed=aed_fee,
-                amount_inr=0.0,
+                amount_inr=inr_amount,
                 status="Pending"
             )
              db.add(new_booking)
