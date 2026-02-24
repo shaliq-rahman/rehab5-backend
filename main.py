@@ -214,7 +214,7 @@ async def resend_booking_email(booking_id: int, db: Session = Depends(get_db), c
     
     meet_link = generate_meet_link(booking.date, booking.time, attendee_emails=[booking.email, doctor_email])
     
-    subject = "Your Rehab 5 Booking is Confirmed ✅"
+    subject = "Your Rehab 5 Booking is Confirmed"
     body = get_patient_email_template(booking.name, booking.date, booking.time, meet_link)
     
     doctor_subject = "Patient Consultation Resent"
@@ -445,7 +445,7 @@ async def verify_payment(data: PaymentVerification, db: Session = Depends(get_db
             meet_link = generate_meet_link(data.date, data.slot, attendee_emails=[data.email, doctor_email])
             
             # Send confirmation email with Meet link
-            subject = "Your Rehab 5 Booking is Confirmed ✅"
+            subject = "Your Rehab 5 Booking is Confirmed"
             body = get_patient_email_template(booking.name, data.date, data.slot, meet_link)
             
             doctor_subject = "New Patient Consultation Scheduled"
