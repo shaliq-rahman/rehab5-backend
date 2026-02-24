@@ -105,6 +105,11 @@ class Booking(Base):
     amount_inr = Column(Float, default=0.0)       # INR amount charged via Razorpay
     created_at = Column(DateTime, default=datetime.utcnow)  # always UTC
 
+class SystemSettings(Base):
+    __tablename__ = "system_settings"
+    id = Column(Integer, primary_key=True, index=True)
+    doctor_email = Column(String, default="shaliqrhmnv@gmail.com")
+
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
@@ -159,6 +164,31 @@ def login(form_data: OAuth2PasswordRequestForm = Depends()):
     )
     return {"access_token": access_token, "token_type": "bearer"}
 
+class SettingsUpdate(BaseModel):
+    doctor_email: str
+
+@app.get("/admin/settings")
+def get_settings(db: Session = Depends(get_db), current_admin: str = Depends(get_current_admin)):
+    settings = db.query(SystemSettings).first()
+    if not settings:
+        settings = SystemSettings(doctor_email="shaliqrhmnv@gmail.com")
+        db.add(settings)
+        db.commit()
+        db.refresh(settings)
+    return settings
+
+@app.put("/admin/settings")
+def update_settings(data: SettingsUpdate, db: Session = Depends(get_db), current_admin: str = Depends(get_current_admin)):
+    settings = db.query(SystemSettings).first()
+    if not settings:
+        settings = SystemSettings(doctor_email=data.doctor_email)
+        db.add(settings)
+    else:
+        settings.doctor_email = data.doctor_email
+    db.commit()
+    db.refresh(settings)
+    return settings
+
 @app.get("/admin/bookings")
 def get_all_bookings(
     date: str = Query(None, description="Filter by date in YYYY-MM-DD format"),
@@ -173,118 +203,42 @@ def get_all_bookings(
     return bookings
 
 @app.post("/admin/resend-email/{booking_id}")
-def resend_booking_email(booking_id: int, db: Session = Depends(get_db), current_admin: str = Depends(get_current_admin)):
+async def resend_booking_email(booking_id: int, db: Session = Depends(get_db), current_admin: str = Depends(get_current_admin)):
     booking = db.query(Booking).filter(Booking.id == booking_id).first()
     if not booking:
         raise HTTPException(status_code=404, detail="Booking not found")
-        
-    from utils import send_email, generate_meet_link
-    meet_link = generate_meet_link(booking.date, booking.time)
+    from utils import generate_meet_link, get_doctor_email_template, get_patient_email_template, send_emails_concurrently
+    
+    settings = db.query(SystemSettings).first()
+    doctor_email = settings.doctor_email if settings and settings.doctor_email else "shaliqrhmnv@gmail.com"
+    
+    meet_link = generate_meet_link(booking.date, booking.time, attendee_emails=[booking.email, doctor_email])
     
     subject = "Your Rehab 5 Booking is Confirmed ✅"
-    body = f"""
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Booking Confirmed</title>
-</head>
-<body style="margin:0;padding:0;background-color:#f0f4f8;font-family:'Segoe UI',Arial,sans-serif;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f0f4f8;padding:40px 0;">
-    <tr>
-      <td align="center">
-        <table width="600" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.08);">
-          <!-- Header -->
-          <tr>
-            <td style="background:linear-gradient(135deg,#0f766e,#14b8a6);padding:40px 40px 32px;text-align:center;">
-              <div style="display:inline-block;background:rgba(255,255,255,0.15);border-radius:12px;padding:10px 24px;margin-bottom:16px;">
-                <span style="color:#ffffff;font-size:22px;font-weight:800;letter-spacing:2px;">REHAB 5</span>
-              </div>
-              <h1 style="color:#ffffff;margin:0;font-size:26px;font-weight:700;letter-spacing:0.5px;">Booking Confirmed</h1>
-              <p style="color:rgba(255,255,255,0.85);margin:8px 0 0;font-size:14px;">Your consultation has been successfully scheduled</p>
-            </td>
-          </tr>
-          <!-- Body -->
-          <tr>
-            <td style="padding:40px;">
-              <p style="color:#374151;font-size:15px;margin:0 0 24px;">Hi {booking.name} 👋,<br/><br/>
-              Great news! Your appointment with <strong>Rehab 5</strong> has been confirmed. We look forward to seeing you.</p>
-
-              <!-- Details Card -->
-              <table width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc;border-radius:12px;border:1px solid #e2e8f0;margin-bottom:28px;">
-                <tr>
-                  <td style="padding:20px 24px;border-bottom:1px solid #e2e8f0;">
-                    <table width="100%">
-                      <tr>
-                        <td style="color:#6b7280;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:1px;width:40%;">📅 Date</td>
-                        <td style="color:#111827;font-size:15px;font-weight:600;">{booking.date}</td>
-                      </tr>
-                    </table>
-                  </td>
-                </tr>
-                <tr>
-                  <td style="padding:20px 24px;border-bottom:1px solid #e2e8f0;">
-                    <table width="100%">
-                      <tr>
-                        <td style="color:#6b7280;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:1px;width:40%;">🕐 Time</td>
-                         <td style="color:#111827;font-size:15px;font-weight:600;">{booking.time} (UAE Time / GST)</td>
-                      </tr>
-                    </table>
-                  </td>
-                </tr>
-                <tr>
-                  <td style="padding:20px 24px;">
-                    <table width="100%">
-                      <tr>
-                        <td style="color:#6b7280;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:1px;width:40%;">🎥 Meeting</td>
-                        <td style="color:#111827;font-size:15px;font-weight:600;">Online Video Call</td>
-                      </tr>
-                    </table>
-                  </td>
-                </tr>
-              </table>
-
-              <!-- CTA Button -->
-              <table width="100%" cellpadding="0" cellspacing="0">
-                <tr>
-                  <td align="center" style="padding:8px 0 32px;">
-                    <a href="{meet_link}" target="_blank"
-                       style="display:inline-block;background:linear-gradient(135deg,#0f766e,#14b8a6);color:#ffffff;text-decoration:none;font-size:16px;font-weight:700;padding:16px 40px;border-radius:50px;letter-spacing:0.5px;box-shadow:0 4px 14px rgba(20,184,166,0.4);">
-                      🎥 &nbsp; Join Video Consultation
-                    </a>
-                  </td>
-                </tr>
-              </table>
-              <p style="color:#6b7280;font-size:13px;text-align:center;margin:0 0 8px;">Or copy this link to your browser:</p>
-              <p style="color:#0f766e;font-size:13px;text-align:center;word-break:break-all;margin:0 0 32px;">{meet_link}</p>
-              <!-- Reminder -->
-              <table width="100%" cellpadding="0" cellspacing="0">
-                <tr>
-                  <td style="background:#fffbeb;border-left:4px solid #f59e0b;border-radius:0 8px 8px 0;padding:14px 18px;">
-                    <p style="margin:0;color:#92400e;font-size:13px;">⏰ <strong>Reminder:</strong> Please join the meeting 5 minutes before your scheduled time.</p>
-                  </td>
-                </tr>
-              </table>
-            </td>
-          </tr>
-          <!-- Footer -->
-          <tr>
-            <td style="background:#f8fafc;padding:24px 40px;border-top:1px solid #e2e8f0;text-align:center;">
-              <p style="color:#9ca3af;font-size:12px;margin:0 0 4px;">© 2025 Rehab 5. All rights reserved.</p>
-              <p style="color:#9ca3af;font-size:12px;margin:0;">If you need to reschedule, please contact us at <a href="mailto:contactsoocher@gmail.com" style="color:#14b8a6;text-decoration:none;">contactsoocher@gmail.com</a></p>
-            </td>
-          </tr>
-        </table>
-      </td>
-    </tr>
-  </table>
-</body>
-</html>
-"""
-    email_sent = send_email(booking.email, subject, body)
+    body = get_patient_email_template(booking.name, booking.date, booking.time, meet_link)
+    
+    doctor_subject = "Patient Consultation Resent"
+    doctor_body = get_doctor_email_template(
+        booking_date=booking.date, 
+        booking_time=booking.time, 
+        patient_name=booking.name, 
+        patient_email=booking.email, 
+        patient_phone=booking.phone, 
+        meet_link=meet_link
+    )
+    
+    email_sent = await send_emails_concurrently(
+        patient_email=booking.email,
+        patient_subject=subject,
+        patient_body=body,
+        doctor_email=doctor_email,
+        doctor_subject=doctor_subject,
+        doctor_body=doctor_body
+    )
+    
     if not email_sent:
          raise HTTPException(status_code=500, detail="Failed to send email via SMTP.")
+
     return {"status": "success", "message": "Email resent successfully."}
 
 @app.get("/slots")
@@ -464,7 +418,7 @@ class PaymentVerification(BaseModel):
     email: str
 
 @app.post("/verify-payment")
-def verify_payment(data: PaymentVerification, db: Session = Depends(get_db)):
+async def verify_payment(data: PaymentVerification, db: Session = Depends(get_db)):
     try:
         # Verify Signature
         params_dict = {
@@ -484,120 +438,39 @@ def verify_payment(data: PaymentVerification, db: Session = Depends(get_db)):
             db.commit()
             
             # Generate Google Meet link (creates calendar event + returns Meet URL)
-            meet_link = generate_meet_link(data.date, data.slot)
+            from utils import generate_meet_link, get_patient_email_template, get_doctor_email_template, send_emails_concurrently
+            
+            settings = db.query(SystemSettings).first()
+            doctor_email = settings.doctor_email if settings and settings.doctor_email else "shaliqrhmnv@gmail.com"
+            meet_link = generate_meet_link(data.date, data.slot, attendee_emails=[data.email, doctor_email])
             
             # Send confirmation email with Meet link
             subject = "Your Rehab 5 Booking is Confirmed ✅"
-            body = f"""
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Booking Confirmed</title>
-</head>
-<body style="margin:0;padding:0;background-color:#f0f4f8;font-family:'Segoe UI',Arial,sans-serif;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f0f4f8;padding:40px 0;">
-    <tr>
-      <td align="center">
-        <table width="600" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.08);">
-
-          <!-- Header -->
-          <tr>
-            <td style="background:linear-gradient(135deg,#0f766e,#14b8a6);padding:40px 40px 32px;text-align:center;">
-              <div style="display:inline-block;background:rgba(255,255,255,0.15);border-radius:12px;padding:10px 24px;margin-bottom:16px;">
-                <span style="color:#ffffff;font-size:22px;font-weight:800;letter-spacing:2px;">REHAB 5</span>
-              </div>
-              <h1 style="color:#ffffff;margin:0;font-size:26px;font-weight:700;letter-spacing:0.5px;">Booking Confirmed</h1>
-              <p style="color:rgba(255,255,255,0.85);margin:8px 0 0;font-size:14px;">Your consultation has been successfully scheduled</p>
-            </td>
-          </tr>
-
-          <!-- Body -->
-          <tr>
-            <td style="padding:40px;">
-
-              <p style="color:#374151;font-size:15px;margin:0 0 24px;">Hi there 👋,<br/><br/>
-              Great news! Your appointment with <strong>Rehab 5</strong> has been confirmed. We look forward to seeing you.</p>
-
-              <!-- Details Card -->
-              <table width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc;border-radius:12px;border:1px solid #e2e8f0;margin-bottom:28px;">
-                <tr>
-                  <td style="padding:20px 24px;border-bottom:1px solid #e2e8f0;">
-                    <table width="100%">
-                      <tr>
-                        <td style="color:#6b7280;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:1px;width:40%;">📅 Date</td>
-                        <td style="color:#111827;font-size:15px;font-weight:600;">{data.date}</td>
-                      </tr>
-                    </table>
-                  </td>
-                </tr>
-                <tr>
-                  <td style="padding:20px 24px;border-bottom:1px solid #e2e8f0;">
-                    <table width="100%">
-                      <tr>
-                        <td style="color:#6b7280;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:1px;width:40%;">🕐 Time</td>
-                         <td style="color:#111827;font-size:15px;font-weight:600;">{data.slot} (UAE Time / GST)</td>
-                      </tr>
-                    </table>
-                  </td>
-                </tr>
-                <tr>
-                  <td style="padding:20px 24px;">
-                    <table width="100%">
-                      <tr>
-                        <td style="color:#6b7280;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:1px;width:40%;">🎥 Meeting</td>
-                        <td style="color:#111827;font-size:15px;font-weight:600;">Online Video Call</td>
-                      </tr>
-                    </table>
-                  </td>
-                </tr>
-              </table>
-
-              <!-- CTA Button -->
-              <table width="100%" cellpadding="0" cellspacing="0">
-                <tr>
-                  <td align="center" style="padding:8px 0 32px;">
-                    <a href="{meet_link}" target="_blank"
-                       style="display:inline-block;background:linear-gradient(135deg,#0f766e,#14b8a6);color:#ffffff;text-decoration:none;font-size:16px;font-weight:700;padding:16px 40px;border-radius:50px;letter-spacing:0.5px;box-shadow:0 4px 14px rgba(20,184,166,0.4);">
-                      🎥 &nbsp; Join Video Consultation
-                    </a>
-                  </td>
-                </tr>
-              </table>
-
-              <p style="color:#6b7280;font-size:13px;text-align:center;margin:0 0 8px;">Or copy this link to your browser:</p>
-              <p style="color:#0f766e;font-size:13px;text-align:center;word-break:break-all;margin:0 0 32px;">{meet_link}</p>
-
-              <!-- Reminder -->
-              <table width="100%" cellpadding="0" cellspacing="0">
-                <tr>
-                  <td style="background:#fffbeb;border-left:4px solid #f59e0b;border-radius:0 8px 8px 0;padding:14px 18px;">
-                    <p style="margin:0;color:#92400e;font-size:13px;">⏰ <strong>Reminder:</strong> Please join the meeting 5 minutes before your scheduled time.</p>
-                  </td>
-                </tr>
-              </table>
-
-            </td>
-          </tr>
-
-          <!-- Footer -->
-          <tr>
-            <td style="background:#f8fafc;padding:24px 40px;border-top:1px solid #e2e8f0;text-align:center;">
-              <p style="color:#9ca3af;font-size:12px;margin:0 0 4px;">© 2025 Rehab 5. All rights reserved.</p>
-              <p style="color:#9ca3af;font-size:12px;margin:0;">If you need to reschedule, please contact us at <a href="mailto:contactsoocher@gmail.com" style="color:#14b8a6;text-decoration:none;">contactsoocher@gmail.com</a></p>
-            </td>
-          </tr>
-
-        </table>
-      </td>
-    </tr>
-  </table>
-</body>
-</html>
-"""
-            email_sent = send_email(data.email, subject, body)
+            body = get_patient_email_template(booking.name, data.date, data.slot, meet_link)
             
+            doctor_subject = "New Patient Consultation Scheduled"
+            doctor_body = get_doctor_email_template(
+                booking_date=data.date, 
+                booking_time=data.slot, 
+                patient_name=booking.name, 
+                patient_email=data.email, 
+                patient_phone=booking.phone, 
+                meet_link=meet_link
+            )
+            
+            email_sent = await send_emails_concurrently(
+                patient_email=data.email,
+                patient_subject=subject,
+                patient_body=body,
+                doctor_email=doctor_email,
+                doctor_subject=doctor_subject,
+                doctor_body=doctor_body
+            )
+            
+            if not email_sent:
+                # Still return success for payment if email fails
+                print("Failed to dispatch emails concurrently during payment verification.")
+                
             return {"status": "success", "meet_link": meet_link, "email_sent": email_sent}
         else:
              raise HTTPException(status_code=404, detail="Booking not found")
