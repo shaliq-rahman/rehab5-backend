@@ -198,8 +198,9 @@ def send_email(to_email: str, subject: str, body: str) -> bool:
         service = build('gmail', 'v1', credentials=creds)
 
         msg = MIMEMultipart("alternative")
-        msg['From'] = sender_email
+        msg['From'] = f"Rehab 5 <{sender_email}>"
         msg['To'] = to_email
+        msg['Reply-To'] = sender_email
         msg['Subject'] = subject
         msg.attach(MIMEText(body, 'html'))
 
